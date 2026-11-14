@@ -81,6 +81,17 @@ code { font-size: 12px; word-break: break-all; background: var(--surface-2); pad
 #nav a.on { background: var(--brand-soft); color: var(--brand); }
 .status { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .status.bad { color: var(--danger); font-weight: 700; }
+.cloudst { font-size: 12px; font-weight: 600; color: var(--muted); text-decoration: none; white-space: nowrap; padding: 3px 8px; border-radius: 999px; background: var(--surface-2); }
+.cloudst.ok { color: var(--up); }
+.cloudst.bad { color: var(--danger); }
+.cloudform { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+.cloudform label { display: grid; gap: 4px; font-weight: 600; color: var(--text-2); font-size: 13px; }
+.card p.pad { margin: 0 0 12px; }
+.modal { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, .45); display: grid; place-items: center; padding: 16px; }
+.dlg { background: var(--surface); color: var(--text); border-radius: 14px; padding: 20px; max-width: 440px; width: 100%; box-shadow: 0 10px 40px rgba(0, 0, 0, .3); }
+.dlg p { margin: 0 0 16px; line-height: 1.6; }
+.dlg .btns { flex-direction: column; }
+.dlg .btns .btn { width: 100%; min-height: 42px; }
 
 main { padding: 16px 20px 40px; max-width: 1280px; margin: 0 auto; }
 .page-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -237,6 +248,9 @@ th.sortable:hover, th.sortable.on { color: var(--brand); }
   .toast { bottom: calc(80px + env(safe-area-inset-bottom)); }
   .page-head h2 { font-size: 18px; }
   .search { width: 100%; margin-left: 0; }
+  .cloudform { grid-template-columns: 1fr; }
+  .status { display: none; }
+  .cloudst { margin-left: auto; }
   .datebar { width: 100%; }
   .datebar input[type=date] { flex: 1; }
   .kpis { grid-template-columns: 1fr 1fr; gap: 8px; }

@@ -1,7 +1,7 @@
 /* 菜品銷售紀錄系統 — 每日銷量、菜單價格、統計報表（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -63,7 +63,10 @@
 
   let db;
   let saveTimer;
-  function save() { setStatus('儲存中…'); clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400); }
+  function save() {
+    setStatus('儲存中…'); clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400);
+    Cloud.schedule();
+  }
   async function flush() {
     clearTimeout(saveTimer); saveTimer = null;
     const text = JSON.stringify(db);
@@ -86,34 +89,50 @@
     ['湯品', '貢丸湯', 35, 12], ['湯品', '味噌湯', 30, 8],
     ['飲料', '紅茶', 25, 6], ['飲料', '冬瓜茶', 25, 6],
   ];
-  const blank = () => ({ ver: 1, shop: '', dishes: [], sales: {}, createdAt: Date.now() });
+  // 每筆資料都有 at（最後修改時間，毫秒）供雲端同步比較新舊；份數改成 0 時保留 {q:0} 當作刪除記號
+  const blank = () => ({ ver: 2, shop: '', shopAt: 0, dishes: [], sales: {}, createdAt: Date.now(), seedAt: 0 });
   function seed() {
-    const d = blank();
-    d.dishes = SAMPLE.map(([cat, name, price, cost]) => ({ id: uid(), name, cat, price, cost, off: false, deleted: false }));
+    const d = blank(), now = Date.now();
+    d.seedAt = now;
+    d.dishes = SAMPLE.map(([cat, name, price, cost], i) => ({ id: uid(), name, cat, price, cost, off: false, deleted: false, ord: i + 1, at: now }));
     return d;
+  }
+  function normDish(x, i) {
+    return {
+      id: String(x.id), name: String(x.name ?? '').trim(), cat: String(x.cat || '未分類').trim() || '未分類',
+      price: Math.max(0, num(x.price)), cost: Math.max(0, num(x.cost)), off: !!x.off, deleted: !!x.deleted,
+      ord: num(x.ord) || i + 1, at: num(x.at) || 1,
+    };
   }
   function norm(d) {
     if (!d || typeof d !== 'object' || !Array.isArray(d.dishes)) throw new Error('不是菜品銷售紀錄的資料');
-    d.ver = 1;
+    d.ver = 2;
     d.shop = String(d.shop || '');
-    d.dishes = d.dishes.filter((x) => x && x.id).map((x) => ({
-      id: String(x.id), name: String(x.name || '未命名'), cat: String(x.cat || '未分類').trim() || '未分類',
-      price: num(x.price), cost: num(x.cost), off: !!x.off, deleted: !!x.deleted,
-    }));
+    d.shopAt = num(d.shopAt);
+    d.seedAt = num(d.seedAt);
+    d.dishes = d.dishes.filter((x) => x && x.id).map(normDish);
+    sortDishes(d);
     d.sales = d.sales && typeof d.sales === 'object' ? d.sales : {};
     for (const [k, v] of Object.entries(d.sales)) {
       if (!validYmd(k) || !v || typeof v !== 'object') { delete d.sales[k]; continue; }
       v.items = v.items && typeof v.items === 'object' ? v.items : {};
       for (const [id, e] of Object.entries(v.items)) {
-        if (!e || !(num(e.q) > 0)) { delete v.items[id]; continue; }
-        v.items[id] = { q: Math.floor(num(e.q)), p: num(e.p), c: num(e.c) };
+        if (!e) { delete v.items[id]; continue; }
+        v.items[id] = { q: Math.max(0, Math.floor(num(e.q))), p: num(e.p), c: num(e.c), at: num(e.at) || 1 };
       }
       v.note = String(v.note || '');
+      v.noteAt = num(v.noteAt) || (v.note ? 1 : 0);
     }
+    if (d.cloud && typeof d.cloud === 'object') {
+      const c = d.cloud;
+      d.cloud = { url: String(c.url || ''), pw: String(c.pw || ''), rev: num(c.rev), pushedAt: num(c.pushedAt), on: !!c.on, lastOk: num(c.lastOk), sheet: /^https:\/\/docs\.google\.com\//.test(c.sheet || '') ? String(c.sheet) : '' };
+    } else delete d.cloud;
     return d;
   }
+  function sortDishes(d) { d.dishes.sort((a, b) => a.ord - b.ord); }
   const dishById = (id) => db.dishes.find((x) => x.id === id);
   const liveDishes = () => db.dishes.filter((x) => !x.deleted);
+  const now = () => Date.now();
   function groupByCat(list) {
     const m = new Map();
     for (const d of list) { if (!m.has(d.cat)) m.set(d.cat, []); m.get(d.cat).push(d); }
@@ -121,9 +140,10 @@
   }
   function dayOf(s, create) {
     let v = db.sales[s];
-    if (!v && create) v = db.sales[s] = { items: {}, note: '' };
+    if (!v && create) v = db.sales[s] = { items: {}, note: '', noteAt: 0 };
     return v;
   }
+  const qOf = (v, id) => (v && v.items[id] ? v.items[id].q : 0);
   function dayTotals(v) {
     let rev = 0, cost = 0, qty = 0;
     if (v) for (const e of Object.values(v.items)) { rev += e.q * e.p; cost += e.q * e.c; qty += e.q; }
@@ -131,9 +151,10 @@
   }
   function cleanupDay(s) {
     const v = db.sales[s];
-    if (v && !Object.keys(v.items).length && !v.note.trim()) delete db.sales[s];
+    if (v && !Object.keys(v.items).length && !v.note.trim() && !v.noteAt) delete db.sales[s];
   }
-  const hasSales = (id) => Object.values(db.sales).some((v) => v.items[id]);
+  const hasSales = (id) => Object.values(db.sales).some((v) => qOf(v, id) > 0);
+  const dayHasData = (v) => !!v && (Object.values(v.items).some((e) => e.q > 0) || !!v.note.trim());
 
   // ------------------------------------------------------------------ 路由
   const cur = { view: '', date: today() };
@@ -163,8 +184,8 @@
   function viewDay(el, date) {
     cur.date = date;
     const v = dayOf(date);
-    const list = liveDishes().filter((d) => !d.off || (v && v.items[d.id]));
-    const extra = v ? Object.keys(v.items).filter((id) => !list.some((d) => d.id === id)).map(dishById).filter(Boolean) : [];
+    const list = liveDishes().filter((d) => !d.off || qOf(v, d.id) > 0);
+    const extra = v ? Object.keys(v.items).filter((id) => qOf(v, id) > 0 && !list.some((d) => d.id === id)).map(dishById).filter(Boolean) : [];
     const groups = groupByCat([...list, ...extra]);
     const wd = pd(date).getDay();
     const isToday = date === today();
@@ -183,9 +204,9 @@
       <div class="day-groups">${[...groups].map(([cat, ds]) => `
         <section class="group"><h3>${esc(cat)}</h3>
         ${ds.map((x) => {
-          const e = v && v.items[x.id]; const q = e ? e.q : 0; const p = e ? e.p : x.price;
+          const e = v && v.items[x.id]; const q = e ? e.q : 0; const p = q ? e.p : x.price;
           return `<div class="row${q ? ' has' : ''}" data-id="${x.id}" data-name="${esc(x.name.toLowerCase())}">
-            <div class="nm">${esc(x.name)}${x.deleted ? '<small class="tag">已刪除</small>' : ''}${x.off ? '<small class="tag">停售</small>' : ''}<small class="pr">$${fmt(p)}</small></div>
+            <div class="nm">${esc(x.name || '未命名')}${x.deleted ? '<small class="tag">已刪除</small>' : ''}${x.off ? '<small class="tag">停售</small>' : ''}<small class="pr">$${fmt(p)}</small></div>
             <div class="qty"><button class="btn icon" data-act="dec" tabindex="-1" aria-label="減一">−</button><input type="number" min="0" step="1" inputmode="numeric" value="${q || ''}" placeholder="0" data-q aria-label="${esc(x.name)} 份數"><button class="btn icon" data-act="inc" tabindex="-1" aria-label="加一">＋</button></div>
             <div class="sub">${q ? money(q * p) : ''}</div></div>`;
         }).join('')}
@@ -211,16 +232,22 @@
         inp.value = q || '';
         setQty(date, row.dataset.id, q, row);
       } else if (a === 'clearday') {
-        if (!db.sales[date]) return toast('本日沒有資料');
-        if (confirm(`確定清空 ${date} 的所有份數與備註？`)) { delete db.sales[date]; save(); route(); }
+        const day = db.sales[date];
+        if (!dayHasData(day)) return toast('本日沒有資料');
+        if (confirm(`確定清空 ${date} 的所有份數與備註？`)) {
+          const t = now();
+          for (const e of Object.values(day.items)) if (e.q) { e.q = 0; e.at = t; }
+          if (day.note) { day.note = ''; day.noteAt = t; }
+          save(); route();
+        }
       } else if (a === 'copy') {
-        const prev = Object.keys(db.sales).filter((k) => k < date && Object.keys(db.sales[k].items).length).sort().pop();
+        const prev = Object.keys(db.sales).filter((k) => k < date && Object.values(db.sales[k].items).some((e) => e.q > 0)).sort().pop();
         if (!prev) return toast('之前沒有銷售紀錄');
-        const day = dayOf(date, true); let n = 0;
+        const day = dayOf(date, true); let n = 0; const t = now();
         for (const [id, e] of Object.entries(db.sales[prev].items)) {
           const x = dishById(id);
-          if (!x || x.deleted || x.off || day.items[id]) continue;
-          day.items[id] = { q: e.q, p: x.price, c: x.cost }; n++;
+          if (!e.q || !x || x.deleted || x.off || qOf(day, id) > 0) continue;
+          day.items[id] = { q: e.q, p: x.price, c: x.cost, at: t }; n++;
         }
         cleanupDay(date); save(); route();
         toast(n ? `已帶入 ${prev} 的 ${n} 道菜份數，請再修正` : '沒有可帶入的菜品');
@@ -232,7 +259,7 @@
         const row = t.closest('.row');
         setQty(date, row.dataset.id, Math.max(0, Math.floor(num(t.value))), row);
       } else if (t.id === 'q') { dayFilter = t.value; applyFilter(); }
-      else if (t.id === 'note') { dayOf(date, true).note = t.value; cleanupDay(date); save(); }
+      else if (t.id === 'note') { const d = dayOf(date, true); d.note = t.value; d.noteAt = now(); save(); }
     };
     el.onchange = (e) => { if (e.target.id === 'date' && validYmd(e.target.value)) go(e.target.value); };
     el.onfocusin = (e) => { if (e.target.matches('[data-q]')) setTimeout(() => e.target.select(), 0); };
@@ -248,15 +275,17 @@
   }
   function setQty(date, id, q, row) {
     const x = dishById(id);
+    const day = dayOf(date, q > 0);
+    const e = day && day.items[id];
+    if (e && e.q === q) return;
     if (q > 0) {
-      const day = dayOf(date, true);
-      if (day.items[id]) day.items[id].q = q;
-      else day.items[id] = { q, p: x.price, c: x.cost }; // 記下當時的售價與成本
-    } else if (db.sales[date]) delete db.sales[date].items[id];
-    cleanupDay(date); save();
-    const e = db.sales[date] && db.sales[date].items[id];
+      if (e && e.q > 0) { e.q = q; e.at = now(); }
+      else day.items[id] = { q, p: x.price, c: x.cost, at: now() }; // 記下當時的售價與成本
+    } else if (e) { e.q = 0; e.at = now(); }
+    save();
+    const ne = day && day.items[id];
     row.classList.toggle('has', q > 0);
-    $('.sub', row).textContent = e ? money(e.q * e.p) : '';
+    $('.sub', row).textContent = q > 0 ? money(ne.q * ne.p) : '';
     renderDayKpi();
   }
   function renderDayKpi() {
@@ -303,7 +332,8 @@
       const a = b.dataset.act;
       if (a === 'add') {
         const last = list[list.length - 1];
-        const d = { id: uid(), name: '', cat: last ? last.cat : '未分類', price: 0, cost: 0, off: false, deleted: false };
+        const ord = Math.max(0, ...db.dishes.map((x) => x.ord)) + 1;
+        const d = { id: uid(), name: '', cat: last ? last.cat : '未分類', price: 0, cost: 0, off: false, deleted: false, ord, at: now() };
         db.dishes.push(d); save(); viewMenu(el);
         const inp = $(`tr[data-id="${d.id}"] [data-f=name]`, el); inp.scrollIntoView({ block: 'center' }); inp.focus();
         return;
@@ -313,14 +343,16 @@
       if (a === 'up' || a === 'down') {
         const i = list.indexOf(d), j = a === 'up' ? i - 1 : i + 1;
         if (!list[j]) return;
-        const ia = db.dishes.indexOf(d), ib = db.dishes.indexOf(list[j]);
-        [db.dishes[ia], db.dishes[ib]] = [db.dishes[ib], db.dishes[ia]];
-        save(); viewMenu(el);
+        const o = list[j], t = now();
+        [d.ord, o.ord] = [o.ord, d.ord];
+        if (d.ord === o.ord) d.ord += a === 'up' ? -0.5 : 0.5;
+        d.at = o.at = t;
+        sortDishes(db); save(); viewMenu(el);
         const nb = $(`tr[data-id="${d.id}"] [data-act=${a}]`, el); if (nb && !nb.disabled) nb.focus();
       } else if (a === 'del') {
         const used = hasSales(d.id);
         if (!confirm(`刪除「${d.name || '未命名'}」？${used ? '\n\n這道菜已有銷售紀錄，過去的報表仍會保留它的數字。\n（只是暫時不賣的話，勾「停售」就好）' : ''}`)) return;
-        if (used) d.deleted = true; else db.dishes.splice(db.dishes.indexOf(d), 1);
+        d.deleted = true; d.at = now(); // 保留刪除記號，其他裝置同步時才會一起刪掉
         save(); viewMenu(el);
       }
     };
@@ -331,6 +363,7 @@
       else if (f === 'cat') d.cat = t.value.trim() || '未分類';
       else if (f === 'price' || f === 'cost') d[f] = Math.max(0, num(t.value));
       else if (f === 'off') { d.off = t.checked; tr.classList.toggle('off', d.off); }
+      d.at = now();
       $('[data-gp]', tr).textContent = money(d.price - d.cost);
       $('[data-gr]', tr).textContent = pct(d.price - d.cost, d.price);
       save();
@@ -370,10 +403,12 @@
     for (const [k, v] of Object.entries(db.sales)) {
       if (k < from || k > to) continue;
       const t = dayTotals(v);
+      if (!t.qty && !v.note.trim()) continue;
       r.byDay.set(k, t);
       if (t.qty > 0) r.days++;
       r.rev += t.rev; r.cost += t.cost; r.qty += t.qty;
       for (const [id, e] of Object.entries(v.items)) {
+        if (!e.q) continue;
         let a = r.byDish.get(id);
         if (!a) r.byDish.set(id, a = { id, qty: 0, rev: 0, cost: 0 });
         a.qty += e.q; a.rev += e.q * e.p; a.cost += e.q * e.c;
@@ -618,7 +653,7 @@
     const dishes = ranked.map((r) => r.d);
     const matrix = [
       [{ v: '日期', s: B }, { v: '星期', s: B }, ...dishes.map((d) => ({ v: d.name, s: B })), { v: '份數合計', s: B }],
-      ...days.map((k) => { const it = db.sales[k].items; return [k, '週' + WD[pd(k).getDay()], ...dishes.map((d) => (it[d.id] ? it[d.id].q : null)), a.byDay.get(k).qty]; }),
+      ...days.map((k) => { const it = db.sales[k].items; return [k, '週' + WD[pd(k).getDay()], ...dishes.map((d) => (it[d.id] && it[d.id].q ? it[d.id].q : null)), a.byDay.get(k).qty]; }),
       [{ v: '合計', s: B }, null, ...ranked.map((r) => ({ v: r.qty, s: B })), { v: a.qty, s: B }],
     ];
     return [
@@ -662,77 +697,313 @@
     toast('已下載：' + name);
   }
 
+  // ------------------------------------------------------------------ Google 雲端同步
+  const Cloud = {
+    busy: false, again: false, timer: null, poll: null, state: '', err: '',
+    on() { return !!(db.cloud && db.cloud.on && db.cloud.url && db.cloud.pw); },
+    async req(body, c = db.cloud) {
+      const ctl = new AbortController();
+      const to = setTimeout(() => ctl.abort(), 45000);
+      try {
+        const r = await fetch(c.url, { method: 'POST', body: JSON.stringify({ ...body, pw: c.pw }), headers: { 'Content-Type': 'text/plain;charset=utf-8' }, signal: ctl.signal });
+        const t = await r.text();
+        let j;
+        try { j = JSON.parse(t); } catch (e) { throw new Error(r.ok ? '雲端回應格式不對（網址正確嗎？）' : '雲端錯誤 HTTP ' + r.status); }
+        if (!j.ok) { const e = new Error(j.err || '雲端錯誤'); e.auth = !!j.auth; throw e; }
+        return j;
+      } catch (e) {
+        if (e.name === 'AbortError') throw new Error('連線逾時');
+        if (e instanceof TypeError) throw new Error('無法連線（請檢查網路或網址）');
+        throw e;
+      } finally { clearTimeout(to); }
+    },
+    changes(since) {
+      const out = { dishes: [], sales: [], notes: [] };
+      for (const d of db.dishes) if (d.at > since) out.dishes.push(d);
+      for (const [k, v] of Object.entries(db.sales)) {
+        for (const [id, e] of Object.entries(v.items)) if (e.at > since) out.sales.push({ d: k, id, q: e.q, p: e.p, c: e.c, at: e.at });
+        if (v.noteAt > since) out.notes.push({ d: k, note: v.note, at: v.noteAt });
+      }
+      if (db.shopAt > since) out.shop = { v: db.shop, at: db.shopAt };
+      return out;
+    },
+    pending() {
+      const c = this.changes(db.cloud.pushedAt);
+      return c.dishes.length + c.sales.length + c.notes.length + (c.shop ? 1 : 0);
+    },
+    merge(r) {
+      let ch = false;
+      for (const x of r.dishes || []) {
+        if (!x || !x.id) continue;
+        const l = dishById(x.id);
+        if (!l) { db.dishes.push(normDish(x, db.dishes.length)); ch = true; } else if (num(x.at) > l.at) { Object.assign(l, normDish(x, 0)); ch = true; }
+      }
+      if (ch) sortDishes(db);
+      for (const x of r.sales || []) {
+        if (!x || !validYmd(x.d) || !x.id) continue;
+        const day = dayOf(x.d, true), l = day.items[x.id];
+        if (!l || num(x.at) > l.at) { day.items[x.id] = { q: Math.max(0, Math.floor(num(x.q))), p: num(x.p), c: num(x.c), at: num(x.at) }; ch = true; }
+      }
+      for (const x of r.notes || []) {
+        if (!x || !validYmd(x.d)) continue;
+        const day = dayOf(x.d, true);
+        if (num(x.at) > day.noteAt) { day.note = String(x.note || ''); day.noteAt = num(x.at); ch = true; }
+      }
+      if (r.shop && num(r.shop.at) > db.shopAt) { db.shop = String(r.shop.v || ''); db.shopAt = num(r.shop.at); renderShop(); ch = true; }
+      return ch;
+    },
+    schedule(ms = 1500) { if (!this.on()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.sync(), ms); },
+    async sync() {
+      if (!this.on()) return false;
+      if (this.busy) { this.again = true; return false; }
+      clearTimeout(this.timer);
+      this.busy = true; this.show('sync');
+      const c = db.cloud;
+      try {
+        const t0 = now() - 1;
+        const r = await this.req({ a: 'sync', since: c.rev, changes: this.changes(c.pushedAt) });
+        if (db.cloud !== c || !this.on()) return false;
+        const changed = this.merge(r);
+        c.rev = r.rev; c.pushedAt = t0; c.lastOk = now();
+        if (r.sheet) c.sheet = r.sheet;
+        await flush();
+        this.err = ''; this.show('ok');
+        if (changed) refresh();
+        return true;
+      } catch (e) {
+        this.err = e.message; this.show(e.auth ? 'auth' : 'err');
+        return false;
+      } finally {
+        this.busy = false;
+        if (this.again) { this.again = false; this.schedule(300); }
+      }
+    },
+    async tick() {
+      if (document.hidden || this.busy || !this.on()) return;
+      if (this.state !== 'ok' || this.pending()) return this.sync();
+      try {
+        const r = await this.req({ a: 'rev' });
+        if (r.rev !== db.cloud.rev) this.sync();
+      } catch (e) { this.err = e.message; this.show(e.auth ? 'auth' : 'err'); }
+    },
+    start() {
+      clearInterval(this.poll);
+      if (!this.on()) { this.show(''); return; }
+      this.poll = setInterval(() => this.tick(), 15000);
+      this.sync();
+    },
+    show(s) {
+      this.state = s;
+      const e = $('#cloudst');
+      const map = { sync: ['☁ 同步中…', ''], ok: ['☁ 已同步', 'ok'], err: ['☁ 離線', 'bad'], auth: ['☁ 密碼錯誤', 'bad'] };
+      const [t, cls] = map[s] || ['', ''];
+      e.textContent = t; e.className = 'cloudst ' + cls;
+      e.title = s === 'ok' ? '最後同步 ' + new Date(db.cloud.lastOk).toLocaleTimeString('zh-TW', { hour12: false }) : this.err;
+      e.hidden = !t;
+      const box = $('#cloudinfo'); if (box) box.innerHTML = cloudInfo();
+    },
+  };
+  let pendingRefresh = false;
+  function refresh() {
+    const a = document.activeElement;
+    if (a && $('#app').contains(a) && a.matches('input, textarea, select')) { pendingRefresh = true; return; }
+    pendingRefresh = false;
+    const y = window.scrollY;
+    route();
+    window.scrollTo(0, y);
+  }
+  document.addEventListener('focusout', () => setTimeout(() => { if (pendingRefresh) refresh(); }, 80));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) Cloud.tick(); });
+  window.addEventListener('online', () => Cloud.tick());
+
+  function choose(msg, opts) {
+    return new Promise((res) => {
+      const m = document.createElement('div');
+      m.className = 'modal';
+      m.innerHTML = `<div class="dlg" role="dialog" aria-modal="true"><p>${esc(msg)}</p><div class="btns">${opts.map(([k, t], i) => `<button class="btn${i ? '' : ' primary'}" data-k="${k}">${esc(t)}</button>`).join('')}</div></div>`;
+      m.onclick = (e) => { const b = e.target.closest('[data-k]'); if (b || e.target === m) { m.remove(); res(b ? b.dataset.k : null); } };
+      document.body.append(m);
+      $('.btn', m).focus();
+    });
+  }
+  const isPristine = () => !Object.values(db.sales).some(dayHasData) && db.dishes.every((d) => d.at <= db.seedAt);
+  async function connectCloud(url, pw) {
+    url = url.trim();
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url) && !/^http:\/\/127\.0\.0\.1:\d+\/?/.test(url)) throw new Error('網址格式不對，應該像 https://script.google.com/macros/s/…/exec');
+    if (pw.length < 4) throw new Error('密碼至少 4 個字');
+    const c = { url, pw, rev: 0, pushedAt: 0, on: true, lastOk: 0 };
+    const r = await Cloud.req({ a: 'ping' }, c);
+    let mode = 'merge';
+    if (r.counts.dishes > 0) {
+      if (isPristine()) mode = 'replace';
+      else {
+        mode = await choose(`雲端已經有資料（菜品 ${r.counts.dishes} 道、銷售 ${r.counts.sales} 筆），這台裝置也有資料。要怎麼處理？`,
+          [['merge', '合併（兩邊都保留）'], ['replace', '改用雲端資料（這台的資料清掉）'], ['cancel', '取消']]);
+        if (!mode || mode === 'cancel') return null;
+      }
+    }
+    if (mode === 'replace') db = blank();
+    db.cloud = c;
+    if (r.sheet) c.sheet = r.sheet;
+    await flush();
+    const ok = await Cloud.sync();
+    Cloud.start();
+    if (!ok) throw new Error(Cloud.err || '同步失敗');
+    return { claimed: r.claimed, mode, cloudHad: r.counts.dishes > 0 };
+  }
+  function cloudInfo() {
+    const c = db.cloud;
+    if (!Cloud.on()) return '';
+    const st = Cloud.state === 'ok' ? `<span class="dl up">● 已同步</span>` : Cloud.state === 'sync' ? '同步中…' : `<span class="dl down">● ${esc(Cloud.err || '尚未同步')}</span>`;
+    return `${st}${c.lastOk ? `・最後同步 ${new Date(c.lastOk).toLocaleString('zh-TW', { hour12: false })}` : ''}`;
+  }
+
   // ------------------------------------------------------------------ 設定
   function viewSettings(el) {
-    const days = Object.keys(db.sales).sort();
+    const days = Object.keys(db.sales).filter((k) => dayHasData(db.sales[k])).sort();
+    const c = db.cloud || {};
+    const on = Cloud.on();
     el.innerHTML = `
       <div class="page-head"><h2>設定</h2></div>
       <section class="card form">
         <label>店名（顯示在標題與匯出檔名）<input id="shopname" value="${esc(db.shop)}" placeholder="例如：阿明小吃店"></label>
       </section>
       <section class="card">
+        <div class="card-head"><h3>☁ Google 雲端同步</h3></div>
+        ${on ? `
+          <p class="pad">資料存在你的 Google 試算表，所有連線的手機、電腦自動同步。<br><span id="cloudinfo">${cloudInfo()}</span></p>
+          <div class="btns pad">
+            <button class="btn primary" data-act="syncnow">立即同步</button>
+            ${c.sheet ? `<a class="btn" href="${esc(c.sheet)}" target="_blank" rel="noopener" data-act="opensheet">開啟試算表</a>` : ''}
+            <button class="btn" data-act="pushall" title="把這台裝置的所有資料重新上傳一次（雲端較新的資料不會被蓋掉）">全部重新上傳</button>
+            <button class="btn" data-act="setpw">修改密碼</button>
+            <button class="btn danger" data-act="disconnect">中斷連線</button>
+          </div>`
+        : `
+          <p class="muted pad">連上 Google 試算表後，資料會存在雲端，多台手機和電腦可以共用同一份資料。</p>
+          <div class="form pad cloudform">
+            <label>雲端網址<input id="curl" value="${esc(c.url || window.DISH_CLOUD_URL || '')}" placeholder="https://script.google.com/macros/s/…/exec" spellcheck="false" autocomplete="off"></label>
+            <label>同步密碼<input id="cpw" type="password" autocomplete="current-password" placeholder="至少 4 個字"></label>
+            <button class="btn primary" data-act="connect">連線</button>
+          </div>
+          <p class="muted pad">第一台連線時輸入的密碼會成為雲端密碼，其他裝置請輸入同一組密碼。</p>`}
+      </section>
+      <section class="card">
         <div class="card-head"><h3>資料備份</h3></div>
         <p class="muted pad">目前有 ${liveDishes().length} 道菜、${days.length} 天的銷售紀錄${days.length ? `（${days[0]} ～ ${days[days.length - 1]}）` : ''}。
-          ${DESK ? '<br>資料檔：<code id="dpath">…</code>（每天自動保留一份備份）' : '<br>資料存在這個瀏覽器裡，換手機或清除瀏覽資料前請先匯出備份。'}</p>
-        <div class="btns pad"><button class="btn primary" data-act="backup">⬇ 匯出備份（JSON）</button>
+          ${DESK ? '<br>本機資料檔：<code id="dpath">…</code>（每天自動保留一份備份）' : on ? '' : '<br>資料存在這個瀏覽器裡，換手機或清除瀏覽資料前請先匯出備份。'}</p>
+        <div class="btns pad"><button class="btn" data-act="backup">⬇ 匯出備份（JSON）</button>
           <label class="btn">⬆ 從備份還原<input type="file" id="restore" accept=".json,application/json" hidden></label></div>
       </section>
       <section class="card">
         <div class="card-head"><h3>試用與清除</h3></div>
         <div class="btns pad">
-          <button class="btn" data-act="demo">產生近 90 天示範銷售資料</button>
+          <button class="btn" data-act="demo" ${on ? 'disabled title="連線雲端時不能產生示範資料"' : ''}>產生近 90 天示範銷售資料</button>
           <button class="btn danger" data-act="clearsales">清除所有銷售紀錄</button>
-          <button class="btn danger" data-act="reset">全部重設（菜單也清空）</button>
+          <button class="btn danger" data-act="reset" ${on ? 'disabled title="請先中斷雲端連線"' : ''}>全部重設（菜單也清空）</button>
         </div>
-        <p class="muted pad">示範資料只會填入「沒有紀錄的日子」，不會覆蓋已輸入的數字。</p>
+        <p class="muted pad">示範資料只會填入「沒有紀錄的日子」，不會覆蓋已輸入的數字。${on ? '<br>連線雲端時「清除所有銷售紀錄」會連雲端一起清除。' : ''}</p>
       </section>
       <p class="muted center">菜品銷售紀錄系統 v${VERSION}${DESK ? '（桌面版）' : ''}・快捷鍵 Alt+1～4 切換頁面</p>`;
     if (DESK) api().then((x) => x.data_path()).then((p) => { const e = $('#dpath'); if (e) e.textContent = p; });
 
-    el.oninput = (e) => { if (e.target.id === 'shopname') { db.shop = e.target.value.trim(); renderShop(); save(); } };
+    el.oninput = (e) => { if (e.target.id === 'shopname') { db.shop = e.target.value.trim(); db.shopAt = now(); renderShop(); save(); } };
+    el.onkeydown = (e) => { if (e.key === 'Enter' && e.target.id === 'cpw') { e.preventDefault(); $('[data-act=connect]', el).click(); } };
     el.onchange = async (e) => {
       if (e.target.id !== 'restore' || !e.target.files[0]) return;
       try {
         const d = norm(JSON.parse(await e.target.files[0].text()));
-        const n = Object.keys(d.sales).length;
-        if (!confirm(`還原這份備份？\n菜品 ${d.dishes.filter((x) => !x.deleted).length} 道、銷售紀錄 ${n} 天。\n\n目前的資料會被完全取代。`)) return;
+        const n = Object.values(d.sales).filter(dayHasData).length;
+        if (!confirm(`還原這份備份？\n菜品 ${d.dishes.filter((x) => !x.deleted).length} 道、銷售紀錄 ${n} 天。\n\n${Cloud.on() ? '備份內容會覆蓋雲端上相同日期、相同菜品的資料。' : '目前的資料會被完全取代。'}`)) return;
+        if (Cloud.on()) {
+          // 連線中：把備份當成最新修改，同步上去
+          const t = now();
+          d.dishes.forEach((x) => { x.at = t; });
+          for (const v of Object.values(d.sales)) { Object.values(v.items).forEach((x) => { x.at = t; }); if (v.noteAt) v.noteAt = t; }
+          if (d.shop) d.shopAt = t;
+          d.cloud = db.cloud;
+        } else delete d.cloud;
         db = d; await flush(); renderShop(); viewSettings(el); toast('已還原備份');
+        Cloud.schedule(200);
       } catch (err) { alert('無法讀取備份：' + err.message); } finally { e.target.value = ''; }
     };
     el.onclick = async (e) => {
       const b = e.target.closest('[data-act]'); if (!b) return;
       const a = b.dataset.act;
-      if (a === 'backup') await saveFile(JSON.stringify(db, null, 1), fname(`${db.shop ? db.shop + '_' : ''}菜品銷售備份_${today().replace(/-/g, '')}.json`), 'application/json');
-      else if (a === 'demo') {
+      if (a === 'connect') {
+        b.disabled = true; b.textContent = '連線中…';
+        try {
+          const r = await connectCloud($('#curl').value, $('#cpw').value);
+          if (r) {
+            renderShop();
+            toast(r.claimed ? '已連線，這組密碼已設為雲端密碼' : r.cloudHad ? (r.mode === 'replace' ? '已連線，已下載雲端資料' : '已連線，資料已合併') : '已連線，資料已上傳到雲端', 4000);
+          }
+        } catch (err) { alert('連線失敗：' + err.message); }
+        viewSettings(el);
+      } else if (a === 'syncnow') {
+        const ok = await Cloud.sync(); toast(ok ? '同步完成' : '同步失敗：' + Cloud.err);
+      } else if (a === 'pushall') {
+        if (!confirm('把這台裝置的所有資料重新上傳一次？（雲端上較新的資料不會被蓋掉）')) return;
+        db.cloud.pushedAt = 0; db.cloud.rev = 0;
+        const ok = await Cloud.sync(); toast(ok ? '已重新上傳並下載雲端資料' : '失敗：' + Cloud.err);
+      } else if (a === 'opensheet') {
+        if (DESK) { e.preventDefault(); (await api()).open_url(db.cloud.sheet); }
+      } else if (a === 'setpw') {
+        const np = prompt('輸入新的同步密碼（至少 4 個字）。\n改完後其他裝置要用新密碼重新連線。');
+        if (np == null) return;
+        if (np.length < 4) return alert('密碼至少 4 個字');
+        if (prompt('再輸入一次新密碼確認：') !== np) return alert('兩次輸入不一樣，沒有修改');
+        try { await Cloud.req({ a: 'setpw', newpw: np }); db.cloud.pw = np; await flush(); toast('密碼已修改'); } catch (err) { alert('修改失敗：' + err.message); }
+      } else if (a === 'disconnect') {
+        if (!confirm('中斷這台裝置的雲端連線？\n資料會留在這台和雲端，之後可以再連線。')) return;
+        await Cloud.sync();
+        db.cloud.on = false; db.cloud.pw = '';
+        await flush(); Cloud.start(); viewSettings(el); toast('已中斷雲端連線');
+      } else if (a === 'backup') {
+        const copy = { ...db }; delete copy.cloud;
+        await saveFile(JSON.stringify(copy, null, 1), fname(`${db.shop ? db.shop + '_' : ''}菜品銷售備份_${today().replace(/-/g, '')}.json`), 'application/json');
+      } else if (a === 'demo') {
+        if (Cloud.on()) return toast('連線雲端時不能產生示範資料');
         if (!liveDishes().length) return toast('請先建立菜單');
         if (!confirm('在近 90 天沒有紀錄的日子填入隨機的示範銷售資料？（之後可用「清除所有銷售紀錄」移除）')) return;
         const n = demoData(90); save(); viewSettings(el); toast(`已產生 ${n} 天示範資料`);
       } else if (a === 'clearsales') {
         if (!days.length) return toast('沒有銷售紀錄');
-        if (prompt(`將刪除全部 ${days.length} 天的銷售紀錄，無法復原。\n確定請輸入「清除」：`) !== '清除') return;
-        db.sales = {}; db.dishes = db.dishes.filter((d) => !d.deleted); save(); viewSettings(el); toast('已清除銷售紀錄');
+        if (prompt(`將刪除全部 ${days.length} 天的銷售紀錄${Cloud.on() ? '（雲端也會一起清除）' : ''}，無法復原。\n確定請輸入「清除」：`) !== '清除') return;
+        if (Cloud.on()) {
+          const t = now();
+          for (const v of Object.values(db.sales)) {
+            for (const x of Object.values(v.items)) if (x.q) { x.q = 0; x.at = t; }
+            if (v.note) { v.note = ''; v.noteAt = t; }
+          }
+        } else { db.sales = {}; db.dishes = db.dishes.filter((d) => !d.deleted); }
+        save(); viewSettings(el); toast('已清除銷售紀錄');
       } else if (a === 'reset') {
+        if (Cloud.on()) return toast('請先中斷雲端連線');
         if (prompt('將刪除全部菜單與銷售紀錄，並恢復範例菜單，無法復原。\n確定請輸入「重設」：') !== '重設') return;
-        db = seed(); save(); renderShop(); viewSettings(el); toast('已重設');
+        const keep = db.cloud;
+        db = seed(); if (keep) db.cloud = keep;
+        save(); renderShop(); viewSettings(el); toast('已重設');
       }
     };
   }
   function demoData(nDays) {
     const list = liveDishes().filter((d) => !d.off);
     const pop = new Map(list.map((d) => [d.id, 0.3 + Math.random() * 1.7]));
-    let n = 0;
+    let n = 0; const t = now();
     for (let i = nDays - 1; i >= 0; i--) {
       const k = addD(today(), -i);
-      if (db.sales[k]) continue;
+      if (dayHasData(db.sales[k])) continue;
       const wd = pd(k).getDay();
       if (wd === 1) continue; // 週一公休
       const f = (wd === 0 || wd === 6 ? 1.35 : 1) * (0.8 + Math.random() * 0.4);
       const items = {};
       for (const d of list) {
         const q = Math.round(pop.get(d.id) * f * (d.price > 100 ? 8 : d.price > 50 ? 14 : 20) * (0.6 + Math.random() * 0.8));
-        if (q > 0) items[d.id] = { q, p: d.price, c: d.cost };
+        if (q > 0) items[d.id] = { q, p: d.price, c: d.cost, at: t };
       }
-      db.sales[k] = { items, note: Math.random() < 0.06 ? '下雨' : '' };
+      const rain = Math.random() < 0.06;
+      db.sales[k] = { items, note: rain ? '下雨' : '', noteAt: rain ? t : 0 };
       n++;
     }
     return n;
@@ -758,11 +1029,12 @@
     renderShop();
     route();
     setStatus('');
+    Cloud.start();
     if (!DESK && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
   }
   // 測試用
-  window.__dish = { get db() { return db; }, flush, demoData, reportData, xlsxSheets, buildXlsx: (R) => b64(XLSXW.build(xlsxSheets(R || reportData()))), rep, VERSION };
+  window.__dish = { get db() { return db; }, flush, Cloud, connectCloud, demoData, reportData, xlsxSheets, buildXlsx: (R) => b64(XLSXW.build(xlsxSheets(R || reportData()))), rep, VERSION };
   start();
 })();

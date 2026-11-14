@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 NAME = "菜品銷售紀錄"
+# 程式正在執行時 dist 裡的 exe 無法覆蓋，可用 python build.py <其他資料夾> 先打包到別處
+DIST = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "dist"
 
 
 def main() -> None:
@@ -16,12 +18,12 @@ def main() -> None:
         "--name", NAME,
         "--icon", str(ROOT / "app.ico"),
         "--add-data", f"{ROOT / 'web'};web",
-        "--distpath", str(ROOT / "dist"),
+        "--distpath", str(DIST),
         "--workpath", str(ROOT / "build"),
         "--specpath", str(ROOT / "build"),
         str(ROOT / "desktop" / "main.py"),
     ], cwd=ROOT)
-    exe = ROOT / "dist" / f"{NAME}.exe"
+    exe = DIST / f"{NAME}.exe"
     print(f"\n完成：{exe}  ({exe.stat().st_size / 1e6:.1f} MB)")
 
 

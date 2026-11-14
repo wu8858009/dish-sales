@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -54,6 +55,12 @@ class Api:
 
     def data_path(self):
         return str(DATA_FILE)
+
+    def open_url(self, url):
+        """用預設瀏覽器開啟 Google 試算表（只允許 Google 網址）"""
+        if not str(url).startswith("https://docs.google.com/"):
+            return False
+        return webbrowser.open(url)
 
     def export_file(self, b64, filename):
         """另存新檔（Excel 報表或 JSON 備份）；回傳儲存路徑，取消時回傳空字串"""

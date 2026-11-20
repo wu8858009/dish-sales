@@ -28,6 +28,7 @@ KEEP_BACKUPS = 30
 FILE_TYPES = {
     ".xlsx": "Excel 活頁簿 (*.xlsx)",
     ".json": "JSON 備份 (*.json)",
+    ".pdf": "PDF 檔 (*.pdf)",
 }
 
 _window = None
@@ -63,7 +64,7 @@ class Api:
         return webbrowser.open(url)
 
     def export_file(self, b64, filename):
-        """另存新檔（Excel 報表或 JSON 備份）；回傳儲存路徑，取消時回傳空字串"""
+        """另存新檔（Excel 報表、PDF 或 JSON 備份）；回傳儲存路徑，取消時回傳空字串"""
         ext = Path(filename).suffix.lower()
         docs = Path.home() / "Documents"
         out = os.environ.get("DISHSALES_EXPORT_DIR")  # 自我測試時不跳對話框
@@ -148,16 +149,41 @@ def _selftest(out_path):
         time.sleep(1.5)
         xl = list(Path(os.environ.get("DISHSALES_EXPORT_DIR", "")).glob("*.xlsx")) if os.environ.get("DISHSALES_EXPORT_DIR") else []
         result["xlsx"] = [str(p) for p in xl]
+        exp = Path(os.environ.get("DISHSALES_EXPORT_DIR", "."))
+        # 月報 PDF、備料預估、星期分析、備料單 PDF
+        js("document.querySelector('[data-act=pdf]').click()")
+        result["month_pdf"] = _wait_pdf(exp, "*月報*.pdf")
+        js("location.hash = '#/plan'")
+        time.sleep(0.8)
+        result["plan_rows"] = js("document.querySelectorAll('.fc tbody tr.fr').length")
+        result["plan_total"] = js("document.querySelector('#fc .kpi.main .v') && document.querySelector('#fc .kpi.main .v').innerText")
+        result["week_bars"] = js("document.querySelectorAll('.wbars .wb').length")
+        result["week_rows"] = js("document.querySelectorAll('.wk tbody tr').length")
+        js("document.querySelector('[data-act=fcpdf]').click()")
+        result["plan_pdf"] = _wait_pdf(exp, "*備料單*.pdf")
         js("location.hash = '#/settings'")
         time.sleep(0.6)
         result["dish_list"] = js("document.querySelectorAll('.dlist li').length")
         result["data_path_shown"] = js("document.querySelector('#dpath') && document.querySelector('#dpath').textContent")
         result["window"] = [_window.x, _window.y, _window.width, _window.height]
-        result["ok"] = bool(n and n > 0 and result["saved_today"] and result["cal_days"] and result["rank_rows"] and result["xlsx"] and result["dish_list"])
+        result["ok"] = bool(n and n > 0 and result["saved_today"] and result["cal_days"] and result["rank_rows"] and result["xlsx"] and result["dish_list"]
+                            and result["month_pdf"] and result["plan_pdf"] and result["plan_rows"] and result["week_bars"] == 7)
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     Path(out_path).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     _window.destroy()
+
+
+def _wait_pdf(folder, pattern, timeout=20):
+    """等匯出的 PDF 寫好；回傳 [檔名, 大小, 頁數]"""
+    end = time.time() + timeout
+    while time.time() < end:
+        for p in folder.glob(pattern):
+            data = p.read_bytes()
+            if len(data) > 10000 and data.rstrip().endswith(b"%%EOF"):
+                return [p.name, len(data), data.count(b"/Type /Page\n")]
+        time.sleep(0.3)
+    return None
 
 
 def _fit_screen(margin=24):

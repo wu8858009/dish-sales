@@ -139,23 +139,21 @@ def _selftest(out_path):
         js("window.__dish.flush()")
         time.sleep(0.8)
         result["saved_today"] = json.loads(DATA_FILE.read_text(encoding="utf-8"))["sales"].get(dt.date.today().isoformat())
-        js("window.__dish.demoData(60); window.__dish.flush(); location.hash = '#/report'")
+        js("window.__dish.demoData(60); window.__dish.flush(); location.hash = '#/month'")
         time.sleep(1)
-        result["report_kpi"] = js("[...document.querySelectorAll('.kpi .v')].map(e => e.innerText)")
-        result["trend_bars"] = js("document.querySelectorAll('#trend .bar').length")
+        result["month_kpi"] = js("[...document.querySelectorAll('.kpi .v')].map(e => e.innerText)")
+        result["cal_days"] = js("document.querySelectorAll('.cal-g .cd.has').length")
         result["rank_rows"] = js("document.querySelectorAll('.rank tbody tr').length")
         js("document.querySelector('[data-act=xlsx]').click()")
         time.sleep(1.5)
         xl = list(Path(os.environ.get("DISHSALES_EXPORT_DIR", "")).glob("*.xlsx")) if os.environ.get("DISHSALES_EXPORT_DIR") else []
         result["xlsx"] = [str(p) for p in xl]
-        js("location.hash = '#/menu'")
-        time.sleep(0.4)
-        result["menu_rows"] = js("document.querySelectorAll('.menu-table tbody tr').length")
         js("location.hash = '#/settings'")
         time.sleep(0.6)
+        result["dish_list"] = js("document.querySelectorAll('.dlist li').length")
         result["data_path_shown"] = js("document.querySelector('#dpath') && document.querySelector('#dpath').textContent")
         result["window"] = [_window.x, _window.y, _window.width, _window.height]
-        result["ok"] = bool(n and n > 0 and result["saved_today"] and result["trend_bars"])
+        result["ok"] = bool(n and n > 0 and result["saved_today"] and result["cal_days"] and result["rank_rows"] and result["xlsx"] and result["dish_list"])
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     Path(out_path).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

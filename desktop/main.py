@@ -137,14 +137,21 @@ def _selftest(out_path):
         js("for (let i = 0; i < 3; i++) document.querySelector('.row [data-act=inc]').click()")
         time.sleep(0.2)
         result["day_kpi"] = js("document.querySelector('#daykpi').innerText")
+        # 記錄賣完時間（⏱ → 對話框填 12:30）
+        js("document.querySelector('.row [data-act=so]').click()")
+        time.sleep(0.4)
+        js("(() => { const f = document.querySelector('.modal form'); f.t.value = '12:30'; f.requestSubmit(); })()")
+        time.sleep(0.3)
         js("window.__dish.flush()")
         time.sleep(0.8)
         result["saved_today"] = json.loads(DATA_FILE.read_text(encoding="utf-8"))["sales"].get(dt.date.today().isoformat())
+        result["sold_out"] = any(e.get("so") == "12:30" for e in (result["saved_today"] or {}).get("items", {}).values())
         js("window.__dish.demoData(60); window.__dish.flush(); location.hash = '#/month'")
         time.sleep(1)
         result["month_kpi"] = js("[...document.querySelectorAll('.kpi .v')].map(e => e.innerText)")
         result["cal_days"] = js("document.querySelectorAll('.cal-g .cd.has').length")
         result["rank_rows"] = js("document.querySelectorAll('.rank tbody tr').length")
+        result["rank_cols"] = js("[...document.querySelectorAll('.rank thead th')].map(e => e.innerText)")
         js("document.querySelector('[data-act=xlsx]').click()")
         time.sleep(1.5)
         xl = list(Path(os.environ.get("DISHSALES_EXPORT_DIR", "")).glob("*.xlsx")) if os.environ.get("DISHSALES_EXPORT_DIR") else []
@@ -167,7 +174,7 @@ def _selftest(out_path):
         result["data_path_shown"] = js("document.querySelector('#dpath') && document.querySelector('#dpath').textContent")
         result["window"] = [_window.x, _window.y, _window.width, _window.height]
         result["ok"] = bool(n and n > 0 and result["saved_today"] and result["cal_days"] and result["rank_rows"] and result["xlsx"] and result["dish_list"]
-                            and result["month_pdf"] and result["plan_pdf"] and result["plan_rows"] and result["week_bars"] == 7)
+                            and result["sold_out"] and len(result["rank_cols"] or []) == 7 and result["month_pdf"] and result["plan_pdf"] and result["plan_rows"] and result["week_bars"] == 7)
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     Path(out_path).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -18,15 +18,17 @@ const TABLES = {
   },
   sales: {
     sheet: '銷售',
-    head: ['日期', '菜品ID', '分類', '菜名', '份數', '單價', '成本', '金額', '更新時間', '版本'],
-    text: [1, 2, 3, 4],
+    // 售完時間、輸入者（v2.3 起）加在最後面，舊的列不用搬動
+    head: ['日期', '菜品ID', '分類', '菜名', '份數', '單價', '成本', '金額', '更新時間', '版本', '售完時間', '輸入者'],
+    text: [1, 2, 3, 4, 11, 12],
+    at: 8, ver: 9,
     key: (r) => r.d + '|' + r.id,
     valid: (r) => /^\d{4}-\d{2}-\d{2}$/.test(r.d) && !!r.id,
     toRow: (r, rev, dish) => {
       const d = dish[r.id] || {};
-      return [r.d, r.id, str_(d.cat), str_(d.name), num_(r.q), num_(r.p), num_(r.c), num_(r.q) * num_(r.p), num_(r.at), rev];
+      return [r.d, r.id, str_(d.cat), str_(d.name), num_(r.q), num_(r.p), num_(r.c), num_(r.q) * num_(r.p), num_(r.at), rev, str_(r.so), str_(r.by)];
     },
-    fromRow: (a) => ({ d: ymd_(a[0]), id: str_(a[1]), q: num_(a[4]), p: num_(a[5]), c: num_(a[6]), at: num_(a[8]) }),
+    fromRow: (a) => ({ d: ymd_(a[0]), id: str_(a[1]), q: num_(a[4]), p: num_(a[5]), c: num_(a[6]), at: num_(a[8]), so: hm_(a[10]), by: str_(a[11]) }),
   },
   notes: {
     sheet: '備註',
@@ -39,6 +41,9 @@ const TABLES = {
   },
 };
 const ORDER = ['dishes', 'sales', 'notes'];
+// 更新時間、版本在第幾欄（從 0 算）；沒寫就是最後兩欄
+const atCol_ = (t) => (t.at != null ? t.at : t.head.length - 2);
+const verCol_ = (t) => (t.ver != null ? t.ver : t.head.length - 1);
 
 function str_(v) { return v == null ? '' : String(v); }
 function num_(v) { const n = Number(v); return isFinite(n) ? n : 0; }
@@ -48,6 +53,11 @@ function ymd_(v) {
   const s = str_(v).trim().replace(/\//g, '-');
   const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   return m ? m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2) : s;
+}
+// 售完時間：試算表可能把 11:30 轉成時間格式
+function hm_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'HH:mm');
+  return str_(v).trim();
 }
 function props_() { return PropertiesService.getScriptProperties(); }
 function rev_() { return num_(props_().getProperty('REV')); }
@@ -64,6 +74,9 @@ function sheet_(t) {
     sh = ss.insertSheet(t.sheet);
     sh.getRange(1, 1, 1, t.head.length).setValues([t.head]).setFontWeight('bold');
     sh.setFrozenRows(1);
+  } else if (sh.getLastColumn() < t.head.length) {
+    // 舊版建立的分頁：補上新增欄位的標題
+    sh.getRange(1, 1, 1, t.head.length).setValues([t.head]).setFontWeight('bold');
   }
   return sh;
 }
@@ -141,7 +154,7 @@ function sync_(req) {
   };
   let dish = dishMap();
   for (const name of ORDER) {
-    const t = TABLES[name], D = data[name], atCol = t.head.length - 2;
+    const t = TABLES[name], D = data[name], atCol = atCol_(t);
     for (const r of ch[name] || []) {
       if (!r || !t.valid(r)) continue;
       const k = t.key(r), i = D.idx[k];
@@ -161,7 +174,12 @@ function sync_(req) {
     p.setProperties({ SHOP: str_(ch.shop.v), SHOP_AT: String(num_(ch.shop.at)), SHOP_REV: String(next) });
     changed.shop = true;
   }
-  const any = changed.dishes || changed.sales || changed.notes || changed.shop;
+  // 其他設定（鎖定過去日期等）整包存在指令碼屬性
+  if (ch.settings && num_(ch.settings.at) > num_(p.getProperty('SETTINGS_AT'))) {
+    p.setProperties({ SETTINGS: str_(ch.settings.v), SETTINGS_AT: String(num_(ch.settings.at)), SETTINGS_REV: String(next) });
+    changed.settings = true;
+  }
+  const any = changed.dishes || changed.sales || changed.notes || changed.shop || changed.settings;
   if (changed.dishes) {
     data.dishes.rows.sort((a, b) => num_(a[7]) - num_(b[7]));
     write_(TABLES.dishes, data.dishes.rows);
@@ -182,10 +200,11 @@ function sync_(req) {
   if (since > rev) since = 0;
   const out = { ok: true, rev: rev, full: since === 0, sheet: SpreadsheetApp.getActive().getUrl() };
   for (const name of ORDER) {
-    const t = TABLES[name], vc = t.head.length - 1;
+    const t = TABLES[name], vc = verCol_(t);
     out[name] = data[name].rows.filter((a) => num_(a[vc]) > since).map(t.fromRow);
   }
   if (num_(p.getProperty('SHOP_REV')) > since) out.shop = { v: str_(p.getProperty('SHOP')), at: num_(p.getProperty('SHOP_AT')) };
+  if (num_(p.getProperty('SETTINGS_REV')) > since) out.settings = { v: str_(p.getProperty('SETTINGS')), at: num_(p.getProperty('SETTINGS_AT')) };
   return out;
 }
 
@@ -207,7 +226,7 @@ function onEdit(e) {
         if (str_(a[0]) === '') return;
         if (t === TABLES.sales) { a[0] = ymd_(a[0]); a[7] = num_(a[4]) * num_(a[5]); }
         if (t === TABLES.notes) a[0] = ymd_(a[0]);
-        a[w - 2] = now; a[w - 1] = rev;
+        a[atCol_(t)] = now; a[verCol_(t)] = rev;
       });
       t.text.forEach((c) => sh.getRange(r0, c, vals.length, 1).setNumberFormat('@'));
       sh.getRange(r0, 1, vals.length, w).setValues(vals);

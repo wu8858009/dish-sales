@@ -168,13 +168,21 @@ def _selftest(out_path):
         result["week_rows"] = js("document.querySelectorAll('.wk tbody tr').length")
         js("document.querySelector('[data-act=fcpdf]').click()")
         result["plan_pdf"] = _wait_pdf(exp, "*備料單*.pdf")
+        # 進階分析（7 張卡片）與分析報告 PDF
+        js("location.hash = '#/insight'")
+        time.sleep(0.8)
+        result["insight_cards"] = js("[...document.querySelectorAll('#app section.card')].map(c => c.id).join(',')")
+        result["insight_abc"] = js("document.querySelectorAll('.abc tbody tr').length")
+        js("document.querySelector('[data-act=inspdf]').click()")
+        result["insight_pdf"] = _wait_pdf(exp, "*進階分析*.pdf")
         js("location.hash = '#/settings'")
         time.sleep(0.6)
         result["dish_list"] = js("document.querySelectorAll('.dlist li').length")
         result["data_path_shown"] = js("document.querySelector('#dpath') && document.querySelector('#dpath').textContent")
         result["window"] = [_window.x, _window.y, _window.width, _window.height]
         result["ok"] = bool(n and n > 0 and result["saved_today"] and result["cal_days"] and result["rank_rows"] and result["xlsx"] and result["dish_list"]
-                            and result["sold_out"] and len(result["rank_cols"] or []) == 7 and result["month_pdf"] and result["plan_pdf"] and result["plan_rows"] and result["week_bars"] == 7)
+                            and result["sold_out"] and len(result["rank_cols"] or []) == 7 and result["month_pdf"] and result["plan_pdf"] and result["plan_rows"] and result["week_bars"] == 7
+                            and result["insight_cards"] == "acc,abc,trend,so,nd,cn,yr" and result["insight_abc"] and result["insight_pdf"] and result["insight_pdf"][2] == 2)
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     Path(out_path).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

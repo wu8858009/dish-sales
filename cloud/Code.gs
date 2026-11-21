@@ -286,6 +286,8 @@ function ensureReportTrigger_() {
 }
 /** 在編輯器手動執行一次：授權寄信、建立每週一的觸發條件 */
 function setupReport() {
+  // Google 授權畫面可以只勾部分權限；這行會把還沒給的權限再要一次（寄信、每週自動執行）
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   setup();
   MailApp.getRemainingDailyQuota();
   ensureReportTrigger_();

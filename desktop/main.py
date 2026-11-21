@@ -133,6 +133,7 @@ def _selftest(out_path):
         result["dishes"] = n
         time.sleep(0.5)
         result["day_rows"] = js("document.querySelectorAll('.day-groups .row').length")
+        result["tagbar"] = js("document.querySelectorAll('.tagbar .tg[data-t]').length")
         # 輸入一筆份數（模擬按 ＋ 三次）
         js("for (let i = 0; i < 3; i++) document.querySelector('.row [data-act=inc]').click()")
         time.sleep(0.2)
@@ -173,6 +174,8 @@ def _selftest(out_path):
         time.sleep(0.8)
         result["insight_cards"] = js("[...document.querySelectorAll('#app section.card')].map(c => c.id).join(',')")
         result["insight_abc"] = js("document.querySelectorAll('.abc tbody tr').length")
+        result["insight_new"] = js("['sp','ws','gl','br'].map(id => !!document.getElementById(id)).every(Boolean)")
+        result["waste_rows"] = js("document.querySelectorAll('.wst tbody tr').length")
         js("document.querySelector('[data-act=inspdf]').click()")
         result["insight_pdf"] = _wait_pdf(exp, "*進階分析*.pdf")
         js("location.hash = '#/settings'")
@@ -182,7 +185,8 @@ def _selftest(out_path):
         result["window"] = [_window.x, _window.y, _window.width, _window.height]
         result["ok"] = bool(n and n > 0 and result["saved_today"] and result["cal_days"] and result["rank_rows"] and result["xlsx"] and result["dish_list"]
                             and result["sold_out"] and len(result["rank_cols"] or []) == 7 and result["month_pdf"] and result["plan_pdf"] and result["plan_rows"] and result["week_bars"] == 7
-                            and result["insight_cards"] == "acc,abc,trend,so,nd,cn,yr" and result["insight_abc"] and result["insight_pdf"] and result["insight_pdf"][2] == 2)
+                            and result["insight_cards"] == "acc,abc,trend,so,nd,cn,yr,sp,ws,gl,br" and result["insight_abc"] and result["insight_new"] and result["waste_rows"]
+                            and result["tagbar"] >= 8 and result["insight_pdf"] and result["insight_pdf"][2] == 3)
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     Path(out_path).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

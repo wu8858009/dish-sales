@@ -10,25 +10,30 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="stylesheet" href="styles.css?v=7">
+<link rel="stylesheet" href="styles.css?v=8">
 </head>
 <body>
 <header class="top">
-  <div class="brand"><img src="icons/icon-192.png" alt=""><span id="shop">菜品銷售紀錄</span></div>
-  <nav id="nav">
-    <a href="#/day" data-v="day" title="Alt+1"><b>📝</b><span>每日紀錄</span></a>
-    <a href="#/month" data-v="month" title="Alt+2"><b>📅</b><span>每月合計</span></a>
-    <a href="#/plan" data-v="plan" title="Alt+3"><b>🧾</b><span>備料分析</span></a>
-    <a href="#/insight" data-v="insight" title="Alt+4"><b>📈</b><span>進階分析</span></a>
-    <a href="#/settings" data-v="settings" title="Alt+5"><b>⚙️</b><span>菜品與設定</span></a>
+  <div class="brand"><img src="icons/icon-192.png" alt=""><div class="bt"><span id="shop">菜品銷售紀錄</span><small>銷售管理系統</small></div></div>
+  <nav id="nav" aria-label="主選單">
+    <span class="nav-sec">每日作業</span>
+    <a href="#/day" data-v="day" title="每日紀錄（Alt+1）"><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3.5h6v3H9z"/><path d="M15 5h3.5v15.5h-13V5H9"/><path d="M9 11.5h6M9 15.5h4"/></svg></b><span>每日紀錄</span><kbd>Alt 1</kbd></a>
+    <a href="#/plan" data-v="plan" title="備料分析（Alt+3）"><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/></svg></b><span>備料分析</span><kbd>Alt 3</kbd></a>
+    <span class="nav-sec">報表分析</span>
+    <a href="#/month" data-v="month" title="每月合計（Alt+2）"><b><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4M8 14h2M12 14h2M16 14h.5M8 17h2M12 17h2"/></svg></b><span>每月合計</span><kbd>Alt 2</kbd></a>
+    <a href="#/insight" data-v="insight" title="進階分析（Alt+4）"><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path d="M5 15.5l4.5-5 3.5 3 6-7"/><path d="M15 6.5h4v4"/></svg></b><span>進階分析</span><kbd>Alt 4</kbd></a>
+    <span class="nav-sec">系統</span>
+    <a href="#/settings" data-v="settings" title="菜品與設定（Alt+5）"><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg></b><span>菜品與設定</span><kbd>Alt 5</kbd></a>
   </nav>
-  <span id="status" class="status"></span>
-  <a id="cloudst" class="cloudst" href="#/settings" hidden></a>
+  <div class="foot">
+    <a id="cloudst" class="cloudst" href="#/settings" hidden></a>
+    <span id="status" class="status"></span>
+  </div>
 </header>
 <main id="app"><p class="empty">載入中…</p></main>
 <div id="toast" class="toast" hidden></div>
-<script src="config.js?v=7"></script>
-<script src="xlsx.js?v=7"></script>
-<script src="app.js?v=7"></script>
+<script src="config.js?v=8"></script>
+<script src="xlsx.js?v=8"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

@@ -18,26 +18,28 @@ const TABLES = {
   },
   sales: {
     sheet: '銷售',
-    // 售完時間、輸入者（v2.3 起）加在最後面，舊的列不用搬動
-    head: ['日期', '菜品ID', '分類', '菜名', '份數', '單價', '成本', '金額', '更新時間', '版本', '售完時間', '輸入者'],
+    // 售完時間、輸入者（v2.3 起）、備量（v2.5 起）加在最後面，舊的列不用搬動
+    head: ['日期', '菜品ID', '分類', '菜名', '份數', '單價', '成本', '金額', '更新時間', '版本', '售完時間', '輸入者', '備量'],
     text: [1, 2, 3, 4, 11, 12],
     at: 8, ver: 9,
     key: (r) => r.d + '|' + r.id,
     valid: (r) => /^\d{4}-\d{2}-\d{2}$/.test(r.d) && !!r.id,
     toRow: (r, rev, dish) => {
       const d = dish[r.id] || {};
-      return [r.d, r.id, str_(d.cat), str_(d.name), num_(r.q), num_(r.p), num_(r.c), num_(r.q) * num_(r.p), num_(r.at), rev, str_(r.so), str_(r.by)];
+      return [r.d, r.id, str_(d.cat), str_(d.name), num_(r.q), num_(r.p), num_(r.c), num_(r.q) * num_(r.p), num_(r.at), rev, str_(r.so), str_(r.by), num_(r.m) || ''];
     },
-    fromRow: (a) => ({ d: ymd_(a[0]), id: str_(a[1]), q: num_(a[4]), p: num_(a[5]), c: num_(a[6]), at: num_(a[8]), so: hm_(a[10]), by: str_(a[11]) }),
+    fromRow: (a) => ({ d: ymd_(a[0]), id: str_(a[1]), q: num_(a[4]), p: num_(a[5]), c: num_(a[6]), at: num_(a[8]), so: hm_(a[10]), by: str_(a[11]), m: num_(a[12]) }),
   },
   notes: {
     sheet: '備註',
-    head: ['日期', '備註', '更新時間', '版本'],
-    text: [1, 2],
+    // 特殊日標註（v2.5 起，例如「雨天,連假」）加在最後面
+    head: ['日期', '備註', '更新時間', '版本', '標註'],
+    text: [1, 2, 5],
+    at: 2, ver: 3,
     key: (r) => r.d,
     valid: (r) => /^\d{4}-\d{2}-\d{2}$/.test(r.d),
-    toRow: (r, rev) => [r.d, str_(r.note), num_(r.at), rev],
-    fromRow: (a) => ({ d: ymd_(a[0]), note: str_(a[1]), at: num_(a[2]) }),
+    toRow: (r, rev) => [r.d, str_(r.note), num_(r.at), rev, str_(r.tags)],
+    fromRow: (a) => ({ d: ymd_(a[0]), note: str_(a[1]), at: num_(a[2]), tags: str_(a[4]) }),
   },
 };
 const ORDER = ['dishes', 'sales', 'notes'];
@@ -127,6 +129,10 @@ function doPost(e) {
     p.setProperty('PW_HASH', hash_(np));
     return json_({ ok: true });
   }
+  if (req.a === 'report') {
+    // 立刻寄一封上週的週報（測試用）
+    try { return json_({ ok: true, to: sendWeeklyReport_(true) }); } catch (err) { return json_({ ok: false, err: reportErr_(err) }); }
+  }
   if (req.a === 'sync') {
     const lock = LockService.getScriptLock();
     lock.waitLock(20000);
@@ -174,10 +180,23 @@ function sync_(req) {
     p.setProperties({ SHOP: str_(ch.shop.v), SHOP_AT: String(num_(ch.shop.at)), SHOP_REV: String(next) });
     changed.shop = true;
   }
-  // 其他設定（鎖定過去日期等）整包存在指令碼屬性
-  if (ch.settings && num_(ch.settings.at) > num_(p.getProperty('SETTINGS_AT'))) {
-    p.setProperties({ SETTINGS: str_(ch.settings.v), SETTINGS_AT: String(num_(ch.settings.at)), SETTINGS_REV: String(next) });
-    changed.settings = true;
+  // 其他設定（鎖定、目標、週報）存在指令碼屬性；每一項各自比新舊（v2.5 起每項有自己的 at，舊版只送整包的 at）
+  if (ch.settings && num_(ch.settings.at) > 0) {
+    let cur = {}, inc = {};
+    try { cur = JSON.parse(p.getProperty('SETTINGS') || '{}') || {}; } catch (e) { cur = {}; }
+    try { inc = JSON.parse(str_(ch.settings.v) || '{}') || {}; } catch (e) { inc = {}; }
+    const curAt = num_(p.getProperty('SETTINGS_AT'));
+    let upd = false;
+    Object.keys(inc).forEach((k) => {
+      if (!inc[k] || typeof inc[k] !== 'object') return;
+      const ia = inc[k].at != null ? num_(inc[k].at) : num_(ch.settings.at), ca = cur[k] ? num_(cur[k].at) || curAt : 0;
+      if (ia > ca) { cur[k] = Object.assign({}, inc[k], { at: ia }); upd = true; }
+    });
+    if (upd) {
+      p.setProperties({ SETTINGS: JSON.stringify(cur), SETTINGS_AT: String(Math.max(curAt, num_(ch.settings.at))), SETTINGS_REV: String(next) });
+      changed.settings = true;
+      if (inc.report) ensureReportTrigger_();
+    }
   }
   const any = changed.dishes || changed.sales || changed.notes || changed.shop || changed.settings;
   if (changed.dishes) {
@@ -247,4 +266,89 @@ function setup() {
 function resetPassword() {
   props_().deleteProperty('PW_HASH');
   Logger.log('已清除密碼');
+}
+
+// ------------------------------------------------------------------ 自動週報（v2.5）
+// App 的「自動週報」設定存在 SETTINGS（JSON 的 report: {on, email}）；每週一早上 8 點由時間觸發寄出上週摘要。
+// 第一次使用要在編輯器執行一次 setupReport()，授權寄信和建立觸發條件。
+function settings_() { try { return JSON.parse(props_().getProperty('SETTINGS') || '{}'); } catch (e) { return {}; } }
+function reportErr_(err) {
+  const m = String(err && err.message || err);
+  return /permission|authoriz|權限|授權|required/i.test(m) ? '後端還沒授權寄信：請在 Apps Script 編輯器執行一次 setupReport()' : m;
+}
+function ensureReportTrigger_() {
+  try {
+    const on = !!(settings_().report || {}).on;
+    const has = ScriptApp.getProjectTriggers().filter((t) => t.getHandlerFunction() === 'weeklyReport');
+    if (on && !has.length) ScriptApp.newTrigger('weeklyReport').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(8).create();
+    if (!on) has.forEach((t) => ScriptApp.deleteTrigger(t));
+  } catch (e) { console.warn('觸發條件：' + e); } // 還沒授權時略過，執行 setupReport() 後就會建立
+}
+/** 在編輯器手動執行一次：授權寄信、建立每週一的觸發條件 */
+function setupReport() {
+  setup();
+  MailApp.getRemainingDailyQuota();
+  ensureReportTrigger_();
+  const r = settings_().report || {};
+  Logger.log(r.on ? '完成：每週一 8 點寄到 ' + r.email : '完成授權。在 App 的「菜品與設定 → 自動週報」開啟後就會每週寄出');
+}
+function weeklyReport() { sendWeeklyReport_(false); }
+
+function sendWeeklyReport_(force) {
+  const r = settings_().report || {};
+  if (!r.email) throw new Error('App 還沒設定週報要寄到哪個 Email');
+  if (!r.on && !force) return '';
+  const tz = Session.getScriptTimeZone();
+  const day = (d) => Utilities.formatDate(d, tz, 'yyyy-MM-dd');
+  const t = new Date(); t.setHours(12, 0, 0, 0);
+  const back = (t.getDay() + 6) % 7; // 距離本週一幾天
+  const mon = new Date(t); mon.setDate(t.getDate() - back - 7);
+  const ks = [], pk = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(mon); d.setDate(mon.getDate() + i); ks.push(day(d));
+    const e = new Date(mon); e.setDate(mon.getDate() + i - 7); pk.push(day(e));
+  }
+  const dish = {};
+  read_(TABLES.dishes).forEach((a) => { dish[str_(a[0])] = { name: str_(a[2]), cat: str_(a[1]) }; });
+  const byDay = {}, prevDay = {}, byDish = {}, prevDish = {};
+  let so = 0, made = 0, left = 0;
+  read_(TABLES.sales).forEach((a) => {
+    const k = ymd_(a[0]), id = str_(a[1]), q = num_(a[4]), m = num_(a[12]);
+    if (ks.indexOf(k) >= 0) {
+      byDay[k] = (byDay[k] || 0) + q; if (q) byDish[id] = (byDish[id] || 0) + q;
+      if (q && str_(a[10])) so++;
+      if (m) { made += m; left += Math.max(0, m - q); }
+    } else if (pk.indexOf(k) >= 0) { prevDay[k] = (prevDay[k] || 0) + q; if (q) prevDish[id] = (prevDish[id] || 0) + q; }
+  });
+  const sum = (o) => Object.keys(o).reduce((s, k) => s + o[k], 0);
+  const tot = sum(byDay), ptot = sum(prevDay), open = ks.filter((k) => byDay[k] > 0).length;
+  const pct = (a, b) => (b ? (a >= b ? '↑' : '↓') + Math.abs(Math.round((a / b - 1) * 100)) + '%' : '—');
+  const nm = (id) => (dish[id] ? dish[id].name : '（已移除）');
+  const top = Object.keys(byDish).sort((a, b) => byDish[b] - byDish[a]);
+  const down = Object.keys(prevDish).filter((id) => prevDish[id] >= 10 && (byDish[id] || 0) <= prevDish[id] * 0.7)
+    .sort((a, b) => (byDish[a] || 0) / prevDish[a] - (byDish[b] || 0) / prevDish[b]).slice(0, 5);
+  const shop = str_(props_().getProperty('SHOP')) || '菜品銷售紀錄';
+  const WD = '日一二三四五六';
+  const esc = (x) => str_(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const td = 'padding:7px 10px;border-bottom:1px solid #eee;';
+  const kpi = (l, v, s) => '<td style="padding:10px 14px;border:1px solid #e7e0d5;border-radius:10px;vertical-align:top"><div style="color:#8a8174;font-size:12px;font-weight:700">' + l
+    + '</div><div style="font-size:22px;font-weight:800;margin-top:2px">' + v + '</div><div style="color:#666;font-size:12px">' + (s || '') + '</div></td>';
+  const wdOf = (k) => WD[new Date(k + 'T12:00:00').getDay()];
+  const html = '<div style="font-family:\'Microsoft JhengHei\',\'PingFang TC\',sans-serif;color:#1f1a14;max-width:640px">'
+    + '<div style="border-bottom:3px solid #d9480f;padding-bottom:8px;margin-bottom:14px"><div style="color:#8a8174;font-weight:700">' + esc(shop) + '</div>'
+    + '<h2 style="margin:2px 0 0">菜品銷售週報</h2><div style="color:#8a8174;font-size:13px">' + ks[0].replace(/-/g, '/') + '（一）～ ' + ks[6].replace(/-/g, '/') + '（日）</div></div>'
+    + '<table style="border-collapse:separate;border-spacing:8px 0;margin:0 -8px 16px"><tr>'
+    + kpi('上週總份數', tot.toLocaleString() + ' 份', '比前一週 ' + pct(tot, ptot)) + kpi('營業天數', open + ' 天', open ? '平均每天 ' + Math.round(tot / open) + ' 份' : '')
+    + kpi('賣完次數', so + ' 次', '') + (made ? kpi('報廢率', Math.round(left / made * 100) + '%', '剩 ' + left + ' 份') : '') + '</tr></table>'
+    + '<h3 style="margin:16px 0 6px;color:#d9480f">每天份數</h3><table style="border-collapse:collapse;width:100%">'
+    + ks.map((k, i) => '<tr><td style="' + td + '">' + k.slice(5).replace('-', '/') + '（' + wdOf(k) + '）</td><td style="' + td + 'text-align:right;font-weight:700">' + (byDay[k] || '—')
+      + '</td><td style="' + td + 'text-align:right;color:#8a8174">前一週 ' + (prevDay[pk[i]] || '—') + '</td></tr>').join('') + '</table>'
+    + '<h3 style="margin:16px 0 6px;color:#d9480f">賣最多前 5 名</h3><table style="border-collapse:collapse;width:100%">'
+    + (top.slice(0, 5).map((id, i) => '<tr><td style="' + td + '">' + (i + 1) + '. ' + esc(nm(id)) + '</td><td style="' + td + 'text-align:right;font-weight:700">' + byDish[id]
+      + ' 份</td><td style="' + td + 'text-align:right;color:#8a8174">' + pct(byDish[id], prevDish[id] || 0) + '</td></tr>').join('') || '<tr><td style="' + td + '">上週沒有紀錄</td></tr>') + '</table>'
+    + (down.length ? '<h3 style="margin:16px 0 6px;color:#b91c1c">⚠ 比前一週明顯下滑</h3><ul style="margin:0;padding-left:20px">'
+      + down.map((id) => '<li>' + esc(nm(id)) + '：' + (byDish[id] || 0) + ' 份（前一週 ' + prevDish[id] + ' 份）</li>').join('') + '</ul>' : '')
+    + '<p style="color:#999;font-size:12px;margin-top:20px">由菜品銷售紀錄系統自動寄出。要停止寄送，請到 App 的「菜品與設定 → 自動週報」關閉。</p></div>';
+  MailApp.sendEmail({ to: r.email, subject: shop + ' 菜品銷售週報 ' + ks[0].slice(5).replace('-', '/') + '～' + ks[6].slice(5).replace('-', '/'), htmlBody: html, name: shop });
+  return r.email;
 }
